@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0E1219">
+<title>Eufy Scale</title>
+<style>
+:root{--bg:#0E1219;--t1:rgba(255,255,255,.92);--t2:rgba(255,255,255,.62);--t3:rgba(255,255,255,.42);--sky:#7EA2CF;--mint:#6FC49A;--coral:#D98080;--amber:#D2A36E;--ln:rgba(255,255,255,.14)}
+*{box-sizing:border-box;margin:0}
+body{background:radial-gradient(900px 500px at 15% -10%,#4B6F9C55,transparent 60%),radial-gradient(800px 500px at 100% 30%,#3F946833,transparent 60%),var(--bg);color:var(--t1);
+  font-family:-apple-system,'SF Pro Display',system-ui,'Segoe UI',Tahoma,sans-serif;min-height:100vh;padding:max(20px,env(safe-area-inset-top)) 16px 40px;line-height:1.5}
+main{max-width:520px;margin:0 auto;display:grid;gap:14px}
+h1{font-size:22px}
+.card{background:linear-gradient(135deg,rgba(255,255,255,.1),rgba(255,255,255,.04));border:1px solid var(--ln);border-radius:24px;padding:18px;backdrop-filter:blur(20px)}
+.lbl{font-size:12px;color:var(--t2);font-weight:600;letter-spacing:.05em;text-transform:uppercase}
+.big{font-size:56px;font-weight:700;letter-spacing:-1.5px;line-height:1.1;margin-top:6px}
+.big small{font-size:18px;color:var(--t2);font-weight:500;letter-spacing:0}
+.note{font-size:13px;color:var(--t2);margin-top:8px}
+button.go{width:100%;margin-top:14px;border:0;border-radius:16px;padding:16px;font-size:17px;font-weight:700;color:#0B1220;cursor:pointer;background:linear-gradient(135deg,#9CB8DD,#7CCBA4)}
+button.go:disabled{opacity:.45}
+input{width:100%;margin-top:6px;padding:11px 12px;border-radius:12px;border:1px solid var(--ln);background:rgba(255,255,255,.07);color:var(--t1);font-size:15px;direction:ltr}
+summary{cursor:pointer;color:var(--t2);font-weight:600}
+pre{white-space:pre-wrap;word-break:break-all;font-size:10px;color:var(--t2);margin-top:10px;direction:ltr;text-align:left;max-height:260px;overflow:auto}
+.ok{color:var(--mint)}.warn{color:var(--amber)}.bad{color:var(--coral)}
+</style>
+</head>
+<body>
+<main>
+  <h1>⚖️ ميزان Eufy</h1>
+
+  <div class="card">
+    <div class="lbl">آخر قراءة</div>
+    <div class="big" id="kg">—<small> kg</small></div>
+    <div class="note" id="when"></div>
+    <div class="note" id="st">اقفل تطبيق eufy Life، دوس الزرار، واختار الميزان، وبعدين وقف عليه حافي وساكن.</div>
+    <button class="go" id="go">وزّن</button>
+  </div>
+
+  <details class="card" id="cfgBox">
+    <summary>الإعدادات</summary>
+    <label class="note" for="url" style="display:block;margin-top:12px">Inbox URL (رابط الـ web app بتاع Inbox.gs، ينتهي بـ /exec)</label>
+    <input id="url" placeholder="https://script.google.com/macros/s/…/exec" autocomplete="off" autocapitalize="off">
+    <label class="note" for="tok" style="display:block;margin-top:12px">TOKEN (نفس اللي في Inbox.gs)</label>
+    <input id="tok" type="password" autocomplete="off" autocapitalize="off">
+    <label class="note" for="ds" style="display:block;margin-top:12px">بداية اليوم (الساعة) — زي التراكر</label>
+    <input id="ds" type="number" min="0" max="12" value="4">
+    <div class="note">بيتحفظوا على الجهاز ده بس (localStorage). الصفحة نفسها ما فيهاش أي سر.</div>
+  </details>
+
+  <details class="card">
+    <summary>Debug log</summary>
+    <pre id="log">—</pre>
+  </details>
+</main>
+
+<script>
+/* Weigh a Eufy C1 / P1 / A1 over Web Bluetooth and post the weight to the tracker's Inbox.
+   Protocol: openScale OneByoneHandler (GPL-3.0): service FFF0, notify FFF4, write FFF1, frames start with 0xCF. */
+const $ = s => document.querySelector(s);
+const pad = n => String(n).padStart(2, '0');
+const hexs = (u8, sep = ' ') => Array.from(u8, x => x.toString(16).padStart(2, '0')).join(sep);
+const xorN = (b, n) => { let x = 0; for (let i = 0; i < n; i++) x ^= b[i]; return x & 0xff; };
+const logEl = $('#log'), lines = [];
+const log = l => { lines.push(new Date().toLocaleTimeString() + '  ' + l); if (lines.length > 200) lines.shift(); logEl.textContent = lines.join('\n'); };
+const status = (txt, cls = '') => { const el = $('#st'); el.textContent = txt; el.className = 'note ' + cls; };
+
+/* ---- settings ---- */
+const KEY = 'eufy-scale-page';
+const cfg = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; } };
+function saveCfg(){ try { localStorage.setItem(KEY, JSON.stringify({url:$('#url').value.trim(), tok:$('#tok').value.trim(), ds:Number($('#ds').value)})); } catch (e) {} }
+{ const c = cfg(); $('#url').value = c.url || ''; $('#tok').value = c.tok || ''; if (Number.isFinite(c.ds)) $('#ds').value = c.ds; if (!c.url || !c.tok) $('#cfgBox').open = true; }
+['#url', '#tok', '#ds'].forEach(i => $(i).addEventListener('input', saveCfg));
+
+/* ---- frames (same rules as openScale's Eufy path: settled + impedance present) ---- */
+function parseFrame(b, hist){
+  if (b.length < 11 || b[0] !== 0xcf) return null;
+  const kg = (b[3] | (b[4] << 8)) / 100, imp = ((b[2] << 8) + b[1]) * 0.1, status = b[9];
+  const live = b[10] === xorN(b, 10), hasTs = b.length >= 18 && !(live && b[11] === 0xcf);
+  if (hist && !hasTs) return null;
+  if (status === 1) { log('frame ignored: still settling'); return null; }
+  if (imp === 0) { log('frame ignored: no impedance (socks / poor contact)'); return null; }
+  if (kg <= 0) return null;
+  let ts = Date.now();
+  if (hasTs) {
+    const y = (b[11] << 8) | b[12], mo = Math.min(12, Math.max(1, b[13])), d = Math.max(1, b[14]), dt = new Date(y, mo - 1, d, b[15], b[16], b[17]);
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d || b[15] > 23 || b[16] > 59 || b[17] > 59) return null;
+    ts = dt.getTime();
+  }
+  return { kg, imp: Math.round(imp * 10) / 10, ts };
+}
+const logicalDay = ts => { const c = cfg(), d = new Date(ts - (Number.isFinite(c.ds) ? c.ds : 4) * 3600000); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
+
+/* ---- post to Inbox ---- */
+async function post(r){
+  const c = cfg();
+  if (!c.url || !c.tok) throw new Error('حط الـ Inbox URL والـ TOKEN في الإعدادات');
+  const body = JSON.stringify({ token: c.tok, date: logicalDay(r.ts), kg: Math.round(r.kg * 100) / 100 });
+  const opt = { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body };
+  try {
+    const res = await fetch(c.url, { ...opt, redirect: 'follow' });
+    const j = await res.json();
+    log('inbox: ' + JSON.stringify(j));
+    if (!j.ok) throw new Error(j.error || 'Inbox رفض القراءة');
+    return { confirmed: true };
+  } catch (e) {
+    if (!(e instanceof TypeError)) throw e;                 // network / CORS: the POST may still have arrived
+    log('response unreadable (' + e.message + ') — resending without reading the answer');
+    await fetch(c.url, { ...opt, mode: 'no-cors' });
+    return { confirmed: false };
+  }
+}
+
+/* ---- Bluetooth ---- */
+let busy = false;
+async function weigh(){
+  if (busy) return;
+  if (!navigator.bluetooth) { status('المتصفح ده مش بيدعم Web Bluetooth. على iPhone افتح الصفحة من متصفح Bluefy، وعلى Android من Chrome.', 'bad'); return; }
+  busy = true; $('#go').disabled = true;
+  let dev = null;
+  try {
+    status('اختار الميزان (eufy) من القايمة…');
+    try { dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'eufy' }, { namePrefix: 'Eufy' }, { namePrefix: 'EUFY' }], optionalServices: [0xfff0, 0x180f] }); }
+    catch (e) { status(e.name === 'NotFoundError' ? 'اتلغى — ما اخترتش جهاز.' : e.name === 'SecurityError' ? 'المتصفح منع Bluetooth: ' + e.message : 'خطأ: ' + e.message, 'warn'); return; }
+    log('picked ' + (dev.name || dev.id));
+    let chN, chW;
+    try {
+      const gatt = await dev.gatt.connect();
+      const svc = await gatt.getPrimaryService(0xfff0);
+      chN = await svc.getCharacteristic(0xfff4); chW = await svc.getCharacteristic(0xfff1);
+      await chN.startNotifications();
+    } catch (e) { log('connect failed: ' + e.message); status('ما قدرتش أتوصّل. اقفل تطبيق eufy Life تماماً (اسحبه من الـ recent apps) وجرّب تاني.', 'bad'); return; }
+    status('اتوصّلت — وقف على الميزان حافي وساكن…');
+    const hist = []; let waitAck = true, historic = false, done = false, finish;
+    const finished = new Promise(r => { finish = r; });
+    const write = b => { log('→ ' + hexs(b)); return chW.writeValueWithResponse(Uint8Array.from(b)); };
+    const onFrame = async b => {
+      log('← ' + hexs(b));
+      if (b.length === 2 && waitAck && b[0] === 0xf1 && b[1] === 0) { waitAck = false; historic = true; await write([0xf2, 0x00]); return; }
+      if (b.length === 2 && b[0] === 0xf2 && b[1] === 0 && historic) {
+        historic = false;
+        if (hist.length) {
+          let all = true;
+          for (const r of hist) { try { all = (await post(r)).confirmed && all; } catch (e) { all = false; log('history post failed: ' + e.message); } }
+          if (all) { await write([0xf2, 0x01]); status(`اتسحب ${hist.length} قراءة قديمة من الميزان ✓`, 'ok'); }   // clear the scale only after the tracker confirmed every row
+        }
+        return;
+      }
+      if (b[0] !== 0xcf || b.length < 11) return;
+      const r = parseFrame(b, historic);
+      if (!r) return;
+      if (historic) { hist.push(r); return; }
+      if (done) return; done = true;                                  // the scale repeats its settled frame
+      $('#kg').innerHTML = r.kg.toFixed(2) + '<small> kg</small>';
+      $('#when').textContent = new Date(r.ts).toLocaleString() + ' · ' + r.imp + ' Ω';
+      try {
+        const res = await post(r);
+        status(res.confirmed ? `اتبعت للتراكر ✓ (يوم ${logicalDay(r.ts)})` : 'اتبعت، بس المتصفح مش سايبني أقرا الرد. افتح التراكر وتأكد.', res.confirmed ? 'ok' : 'warn');
+      } catch (e) { status('القراءة اتاخدت بس ما اتبعتتش: ' + e.message, 'bad'); }
+      finish();
+    };
+    chN.addEventListener('characteristicvaluechanged', ev => { const v = ev.target.value; onFrame(new Uint8Array(v.buffer, v.byteOffset, v.byteLength)).catch(e => log('frame error: ' + e.message)); });
+    const mode = [0xfd, 0x37, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0]; mode[10] = xorN(mode, 10);
+    const n = new Date(), y = n.getFullYear();
+    await write(mode);
+    await write([0xf1, (y >> 8) & 0xff, y & 0xff, n.getMonth() + 1, n.getDate(), n.getHours(), n.getMinutes(), n.getSeconds()]);
+    const timeout = new Promise(r => setTimeout(() => r('timeout'), 90000));
+    if (await Promise.race([finished, timeout]) === 'timeout') status('ما جاتش قراءة نهائية. وقف حافي وساكن لحد ما الميزان يثبّت.', 'warn');
+  } catch (e) { log('error: ' + (e && e.message)); status('خطأ: ' + ((e && e.message) || e), 'bad'); }
+  finally { try { dev && dev.gatt && dev.gatt.connected && dev.gatt.disconnect(); } catch (e) {} busy = false; $('#go').disabled = false; }
+}
+$('#go').addEventListener('click', weigh);
+</script>
+</body>
+</html>
