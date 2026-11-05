@@ -45,6 +45,7 @@ pre{white-space:pre-wrap;word-break:break-all;font-size:10px;color:var(--t2);mar
     <input id="tok" type="password" autocomplete="off" autocapitalize="off">
     <label class="note" for="ds" style="display:block;margin-top:12px">بداية اليوم (الساعة) — زي التراكر</label>
     <input id="ds" type="number" min="0" max="12" value="4">
+    <label class="note" style="display:flex;gap:8px;align-items:center;margin-top:12px"><input id="all" type="checkbox" style="width:auto;margin:0"> اعرض كل أجهزة Bluetooth (لو الميزان مش ظاهر في القايمة)</label>
     <div class="note">بيتحفظوا على الجهاز ده بس (localStorage). الصفحة نفسها ما فيهاش أي سر.</div>
   </details>
 
@@ -68,9 +69,9 @@ const status = (txt, cls = '') => { const el = $('#st'); el.textContent = txt; e
 /* ---- settings ---- */
 const KEY = 'eufy-scale-page';
 const cfg = () => { try { return JSON.parse(localStorage.getItem(KEY) || '{}'); } catch (e) { return {}; } };
-function saveCfg(){ try { localStorage.setItem(KEY, JSON.stringify({url:$('#url').value.trim(), tok:$('#tok').value.trim(), ds:Number($('#ds').value)})); } catch (e) {} }
-{ const c = cfg(); $('#url').value = c.url || ''; $('#tok').value = c.tok || ''; if (Number.isFinite(c.ds)) $('#ds').value = c.ds; if (!c.url || !c.tok) $('#cfgBox').open = true; }
-['#url', '#tok', '#ds'].forEach(i => $(i).addEventListener('input', saveCfg));
+function saveCfg(){ try { localStorage.setItem(KEY, JSON.stringify({url:$('#url').value.trim(), tok:$('#tok').value.trim(), ds:Number($('#ds').value), all:$('#all').checked})); } catch (e) {} }
+{ const c = cfg(); $('#url').value = c.url || ''; $('#tok').value = c.tok || ''; if (Number.isFinite(c.ds)) $('#ds').value = c.ds; $('#all').checked = !!c.all; if (!c.url || !c.tok) $('#cfgBox').open = true; }
+['#url', '#tok', '#ds', '#all'].forEach(i => $(i).addEventListener('input', saveCfg));
 
 /* ---- frames (same rules as openScale's Eufy path: settled + impedance present) ---- */
 function parseFrame(b, hist){
@@ -120,7 +121,7 @@ async function weigh(){
   let dev = null;
   try {
     status('اختار الميزان (eufy) من القايمة…');
-    try { dev = await navigator.bluetooth.requestDevice({ filters: [{ namePrefix: 'eufy' }, { namePrefix: 'Eufy' }, { namePrefix: 'EUFY' }], optionalServices: [0xfff0, 0x180f] }); }
+    try { dev = await navigator.bluetooth.requestDevice(cfg().all ? { acceptAllDevices: true, optionalServices: [0xfff0, 0x180f] } : { filters: [{ namePrefix: 'eufy' }, { namePrefix: 'Eufy' }, { namePrefix: 'EUFY' }, { services: [0xfff0] }], optionalServices: [0xfff0, 0x180f] }); }
     catch (e) { status(e.name === 'NotFoundError' ? 'اتلغى — ما اخترتش جهاز.' : e.name === 'SecurityError' ? 'المتصفح منع Bluetooth: ' + e.message : 'خطأ: ' + e.message, 'warn'); return; }
     log('picked ' + (dev.name || dev.id));
     let chN, chW;
